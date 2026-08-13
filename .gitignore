@@ -1,0 +1,18 @@
+# Large data inputs (replaced by floods.gpkg)
+Data/Chirps/
+Data/rasters_SRTMGL3/
+Data/FL20240426KEN.gdb/
+Data/kenya_wards/
+Data/slope_temp.tif
+cache/
+
+# Exploratory notebooks
+feature_engineering.ipynb
+inspect.ipynb
+
+# API Key
+.streamlit/
+
+# Pycache
+__pycache__/
+*.pyc
