@@ -207,8 +207,8 @@ def main() -> None:
     registry = {
         "version": "3.0",
         "created_at": datetime.now(UTC).isoformat(),
-        "model_path": str(MODEL_PATH.relative_to(BASE)),
-        "booster_json_path": str(BOOSTER_JSON_PATH.relative_to(BASE)),
+        "model_path": MODEL_PATH.relative_to(BASE).as_posix(),
+        "booster_json_path": BOOSTER_JSON_PATH.relative_to(BASE).as_posix(),
         "feature_cols": FEATS,
         "n_features": len(FEATS),
         "threshold": thr["threshold"],

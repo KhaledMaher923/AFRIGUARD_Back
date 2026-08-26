@@ -74,7 +74,16 @@ def _registry() -> dict:
 
 def _model():
     if "model" not in _cache:
-        _cache["model"] = joblib.load(BASE / _registry()["model_path"])
+        reg = _registry()
+        joblib_path = BASE / reg["model_path"]
+        try:
+            _cache["model"] = joblib.load(joblib_path)
+        except Exception:
+            import xgboost as xgb
+
+            booster = xgb.XGBClassifier()
+            booster.load_model(str(BASE / reg["booster_json_path"]))
+            _cache["model"] = booster
     return _cache["model"]
 
 
