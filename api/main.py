@@ -41,6 +41,7 @@ import geopandas as gpd
 import joblib
 import pandas as pd
 from fastapi import FastAPI, Form, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from Utils import alert_store
@@ -59,6 +60,14 @@ app = FastAPI(
     title="Nairobi Flood Guard API",
     description="Calibrated ward-level flood risk and matatu rerouting.",
     version="3.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 _lock = threading.Lock()
