@@ -1,8 +1,8 @@
 {
   "version": "3.0",
-  "created_at": "2026-08-07T08:57:28.685926+00:00",
-  "model_path": "Models/flood_model.joblib",
-  "booster_json_path": "Models/flood_model_xgb.json",
+  "created_at": "2026-08-26T10:40:58.667563+00:00",
+  "model_path": "Models\\flood_model.joblib",
+  "booster_json_path": "Models\\flood_model_xgb.json",
   "feature_cols": [
     "elevation_mean_m",
     "elevation_min_m",
@@ -20,9 +20,9 @@
     "pop_density"
   ],
   "n_features": 14,
-  "threshold": 0.2967171718676885,
+  "threshold": 0.30055612325668335,
   "threshold_policy": "max precision subject to recall >= 0.8 on calibrated spatial out-of-fold predictions",
-  "precision_at_threshold": 0.5652173913043478,
+  "precision_at_threshold": 0.5744186046511628,
   "recall_at_threshold": 0.8045602605863192,
   "calibration": "isotonic (CalibratedClassifierCV, county-grouped folds)",
   "cv": {
@@ -41,15 +41,15 @@
     "learning_rate": 0.03
   },
   "metrics_spatial_oof": {
-    "roc_auc": 0.889198092909396,
-    "pr_auc": 0.6904110794566143,
-    "brier": 0.10284637244696596,
+    "roc_auc": 0.8913838946027512,
+    "pr_auc": 0.6874082564654891,
+    "brier": 0.10250748914929458,
     "recall": 0.8045602605863192,
-    "precision": 0.5652173913043478,
-    "f1": 0.6639784946236559
+    "precision": 0.5744186046511628,
+    "f1": 0.6702849389416553
   },
   "metrics_random_split": {
-    "roc_auc": 0.9234940909259307,
+    "roc_auc": 0.924075451480617,
     "note": "Random ward split leaks spatially autocorrelated signal; reported only to quantify optimism vs the spatial CV."
   },
   "labels": {
@@ -59,7 +59,7 @@
     "note": "Single-event labels. To add events: stack rows per (ward, event) with event-specific rainfall columns and an 'event_id' column, then group CV folds by county as before and additionally report per-event holdout metrics."
   },
   "library_versions": {
-    "python": "3.12.3",
+    "python": "3.14.3",
     "xgboost": "3.4.0",
     "scikit-learn": "1.9.0",
     "numpy": "2.4.4"
