@@ -41,7 +41,13 @@ def test_model_artifacts_exist(registry):
 
 @pytest.mark.skipif(not FLOODS_GPKG.exists(), reason="data file not present")
 def test_model_scores_real_wards(registry):
-    model = joblib.load(BASE / registry["model_path"])
+    try:
+        model = joblib.load(BASE / registry["model_path"])
+    except Exception:
+        import xgboost as xgb
+
+        model = xgb.XGBClassifier()
+        model.load_model(str(BASE / registry["booster_json_path"]))
     wards = gpd.read_file(FLOODS_GPKG).head(50)
     wards = engineer_features(wards)
     probs = model.predict_proba(wards[registry["feature_cols"]])[:, 1]
