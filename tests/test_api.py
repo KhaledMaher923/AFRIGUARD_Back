@@ -194,3 +194,97 @@ def test_subscriber_language(client):
         json={"phone": "+254799999999", "ward_or_county": "Ruai", "language": "sw"},
     )
     assert resp.status_code == 201
+
+
+# ---------- /search ----------
+
+
+def test_search_wards(client):
+    body = client.get("/search", params={"q": "Nairobi Central"}).json()
+    assert body["query"] == "Nairobi Central"
+    assert "wards" in body["results"]
+    assert len(body["results"]["wards"]) >= 1
+    assert any("nairobi central" in w["ward"].lower() for w in body["results"]["wards"])
+
+
+def test_search_counties(client):
+    body = client.get("/search", params={"q": "nairobi", "type": "counties"}).json()
+    assert body["types_searched"] == ["counties"]
+    assert len(body["results"]["counties"]) == 1
+    assert body["results"]["counties"][0]["county"].lower() == "nairobi"
+    assert body["results"]["counties"][0]["n_wards"] > 0
+
+
+def test_search_routes(client):
+    body = client.get("/search", params={"q": "Koja", "type": "routes"}).json()
+    assert body["types_searched"] == ["routes"]
+    routes = body["results"]["routes"]
+    assert len(routes) >= 1
+    assert any("koja" in (r.get("route_long_name") or "").lower() for r in routes)
+
+
+def test_search_stops(client):
+    body = client.get("/search", params={"q": "Railways", "type": "stops"}).json()
+    assert body["types_searched"] == ["stops"]
+    stops = body["results"]["stops"]
+    assert len(stops) >= 1
+    assert stops[0]["stop_name"] == "Railways"
+
+
+def test_search_reports(client):
+    client.post(
+        "/reports",
+        json={"text": "Flood water near Ruai bridge", "ward": "Ruai"},
+    )
+    body = client.get("/search", params={"q": "Ruai bridge", "type": "reports"}).json()
+    assert body["types_searched"] == ["reports"]
+    assert len(body["results"]["reports"]) == 1
+    assert "Ruai bridge" in body["results"]["reports"][0]["text"]
+
+
+def test_search_alerts(client):
+    from Utils import alert_store
+
+    alert_store.log_alert(
+        "Kibera", None, "FLOOD ALERT: heavy rains in Kibera ward", "sent",
+        db_path=api_main.REPORTS_DB_PATH, severity="Severe",
+    )
+    body = client.get("/search", params={"q": "Kibera", "type": "alerts"}).json()
+    assert body["types_searched"] == ["alerts"]
+    assert len(body["results"]["alerts"]) == 1
+    assert "Kibera" in body["results"]["alerts"][0]["message"]
+
+
+def test_search_multi_type(client):
+    body = client.get(
+        "/search", params={"q": "Nairobi", "type": "wards,counties"}
+    ).json()
+    assert set(body["types_searched"]) == {"counties", "wards"}
+    assert "routes" not in body["results"]
+    assert "stops" not in body["results"]
+
+
+def test_search_all_types_by_default(client):
+    body = client.get("/search", params={"q": "a"}).json()
+    assert body["types_searched"] == sorted(api_main._SEARCH_TYPES)
+
+
+def test_search_limit(client):
+    body = client.get("/search", params={"q": "a", "type": "stops", "limit": 3}).json()
+    assert len(body["results"]["stops"]) <= 3
+
+
+def test_search_empty_query_422(client):
+    assert client.get("/search", params={"q": ""}).status_code == 422
+
+
+def test_search_invalid_type_422(client):
+    resp = client.get("/search", params={"q": "test", "type": "bogus"})
+    assert resp.status_code == 422
+    assert "Unknown search type" in resp.json()["detail"]
+
+
+def test_search_no_results(client):
+    body = client.get("/search", params={"q": "xyzzy_nonexistent"}).json()
+    assert body["total"] == 0
+    assert all(len(v) == 0 for v in body["results"].values())

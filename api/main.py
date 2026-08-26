@@ -9,6 +9,7 @@ Endpoints:
     GET  /reroutes            rerouting options (precomputed cache if fresh,
                               otherwise computed on demand - slow first call)
     GET  /reroutes/gtfs-rt    the same options as a GTFS-Realtime protobuf feed
+    GET  /search              full-text search across wards, routes, stops, reports, alerts
     POST /reports             flood report intake (JSON)
     POST /reports/sms         Africa's Talking inbound-SMS webhook (form)
     GET  /reports             list stored flood reports
@@ -182,6 +183,143 @@ def ward_risk(ward: str) -> dict:
             col: float(row[col]) for col in _registry()["feature_cols"]
         },
     }
+
+
+_SEARCH_TYPES = {"wards", "counties", "subcounties", "routes", "stops", "reports", "alerts"}
+
+
+def _gtfs_tables_search() -> dict:
+    with _lock:
+        if "gtfs" not in _cache:
+            _cache["gtfs"] = {
+                "stops": pd.read_csv(GTFS_DIR / "stops.txt"),
+                "stop_times": pd.read_csv(GTFS_DIR / "stop_times.txt"),
+                "trips": pd.read_csv(GTFS_DIR / "trips.txt"),
+                "routes": pd.read_csv(GTFS_DIR / "routes.txt"),
+            }
+    return _cache["gtfs"]
+
+
+@app.get("/search")
+def search(
+    q: str = Query(min_length=1, max_length=200, description="Search term"),
+    type: str | None = Query(
+        default=None,
+        description="Comma-separated result types to include "
+        f"(one or more of: {', '.join(sorted(_SEARCH_TYPES))}). "
+        "Defaults to all.",
+    ),
+    limit: int = Query(default=20, ge=1, le=200, description="Max results per type"),
+) -> dict:
+    """Search across wards, counties, routes, stops, flood reports and alerts.
+
+    Matching is case-insensitive substring search.  When ``type`` is omitted
+    every category is searched; pass a comma-separated list to narrow scope
+    (e.g. ``type=wards,routes``).
+    """
+    if type:
+        requested = {t.strip().lower() for t in type.split(",")}
+        invalid = requested - _SEARCH_TYPES
+        if invalid:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown search type(s): {', '.join(sorted(invalid))}. "
+                f"Valid types: {', '.join(sorted(_SEARCH_TYPES))}",
+            )
+    else:
+        requested = _SEARCH_TYPES
+
+    q_lower = q.strip().lower()
+    results: dict[str, list] = {}
+
+    # --- wards / counties / subcounties (from scored GeoDataFrame) ---
+    if requested & {"wards", "counties", "subcounties"}:
+        wards = _scored_wards()
+        thr = _registry()["threshold"]
+        if "wards" in requested:
+            mask = wards["ward"].str.lower().str.contains(q_lower, na=False)
+            hits = (
+                wards.loc[mask, ["ward", "subcounty", "county", "flood_prob"]]
+                .assign(high_risk=lambda d: d["flood_prob"] >= thr)
+                .sort_values("flood_prob", ascending=False)
+                .head(limit)
+                .to_dict(orient="records")
+            )
+            results["wards"] = hits
+        if "counties" in requested:
+            unique_counties = wards["county"].dropna().unique()
+            matched = sorted(c for c in unique_counties if q_lower in c.lower())
+            results["counties"] = [
+                {"county": c, "n_wards": int((wards["county"].str.lower() == c.lower()).sum())}
+                for c in matched[:limit]
+            ]
+        if "subcounties" in requested:
+            unique_sub = wards["subcounty"].dropna().unique()
+            matched = sorted(s for s in unique_sub if q_lower in s.lower())
+            results["subcounties"] = [
+                {
+                    "subcounty": s,
+                    "county": wards.loc[
+                        wards["subcounty"].str.lower() == s.lower(), "county"
+                    ].iloc[0],
+                    "n_wards": int(
+                        (wards["subcounty"].str.lower() == s.lower()).sum()
+                    ),
+                }
+                for s in matched[:limit]
+            ]
+
+    # --- GTFS routes ---
+    if "routes" in requested:
+        gtfs = _gtfs_tables_search()
+        routes_df = gtfs.get("routes")
+        if routes_df is not None:
+            name_cols = [
+                c for c in ("route_short_name", "route_long_name") if c in routes_df.columns
+            ]
+            mask = pd.Series(False, index=routes_df.index)
+            for col in name_cols:
+                mask |= routes_df[col].astype(str).str.lower().str.contains(q_lower, na=False)
+            hits = (
+                routes_df.loc[mask, ["route_id", *name_cols]]
+                .drop_duplicates()
+                .head(limit)
+            )
+            results["routes"] = hits.to_dict(orient="records")
+
+    # --- GTFS stops ---
+    if "stops" in requested:
+        gtfs = _gtfs_tables_search()
+        stops_df = gtfs.get("stops")
+        if stops_df is not None and "stop_name" in stops_df.columns:
+            mask = stops_df["stop_name"].astype(str).str.lower().str.contains(q_lower, na=False)
+            hits = stops_df.loc[mask, ["stop_id", "stop_name", "stop_lat", "stop_lon"]].head(limit)
+            results["stops"] = hits.to_dict(orient="records")
+
+    # --- flood reports ---
+    if "reports" in requested:
+        with _reports_db() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, created_at, source, ward, county, text "
+                "FROM flood_reports ORDER BY id DESC LIMIT 1000"
+            ).fetchall()
+        matched = [dict(r) for r in rows if q_lower in (r["text"] or "").lower()]
+        results["reports"] = matched[:limit]
+
+    # --- alerts ---
+    if "alerts" in requested:
+        with _reports_db() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, timestamp, ward, message, status, severity "
+                "FROM alerts_sent ORDER BY id DESC LIMIT 1000"
+            ).fetchall()
+        matched = [dict(r) for r in rows if q_lower in (r["message"] or "").lower()]
+        results["alerts"] = matched[:limit]
+
+    total = sum(len(v) for v in results.values())
+    return {"query": q, "types_searched": sorted(requested), "total": total, "results": results}
 
 
 @app.get("/reroutes")
