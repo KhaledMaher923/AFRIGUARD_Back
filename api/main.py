@@ -6,6 +6,10 @@ Endpoints:
     GET  /registry            model registry (features, threshold, metrics)
     GET  /wards/risk          scored wards (optionally filtered by county)
     GET  /wards/{ward}/risk   one ward's risk + features
+    GET  /wards/{ward}/risk/history   synthetic trailing risk trend (NOT real history)
+    GET  /wards/geojson       ward boundary polygons (real, from Data/floods.gpkg)
+    GET  /evacuation-centres  evacuation centre locations (MOCK data)
+    GET  /weather             per-ward weather snapshot (MOCK data)
     GET  /reroutes            rerouting options (precomputed cache if fresh,
                               otherwise computed on demand - slow first call)
     GET  /reroutes/gtfs-rt    the same options as a GTFS-Realtime protobuf feed
@@ -28,12 +32,13 @@ flat table to make that swap trivial.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +46,7 @@ import geopandas as gpd
 import joblib
 import pandas as pd
 from fastapi import FastAPI, Form, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from Utils import alert_store
@@ -54,11 +60,28 @@ GTFS_DIR = BASE / "Data" / "GTFS_FEED_2019"
 PRECOMPUTED_REROUTES = BASE / "cache" / "precomputed_reroutes.json"
 PRECOMPUTED_MAX_AGE_HOURS = 6.0
 REPORTS_DB_PATH = Path(os.environ.get("REPORTS_DB_PATH", BASE / "cache" / "flood_reports.db"))
+EVACUATION_CENTRES_PATH = BASE / "Data" / "mock" / "evacuation_centres.json"
 
 app = FastAPI(
     title="Nairobi Flood Guard API",
     description="Calibrated ward-level flood risk and matatu rerouting.",
     version="3.0",
+)
+
+# Allow the frontend (any origin in dev; a fixed comma-separated list in
+# prod) to call this API from the browser. Without this, every /wards,
+# /reroutes, /alerts, etc. call from src/lib/api.ts is silently blocked by
+# the browser's CORS check even though curl/httpie work fine.
+_cors_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS", "*")
+_cors_origins = (
+    ["*"] if _cors_origins_env.strip() == "*" else [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False if _cors_origins == ["*"] else True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 _lock = threading.Lock()
@@ -191,6 +214,132 @@ def ward_risk(ward: str) -> dict:
         "features": {
             col: float(row[col]) for col in _registry()["feature_cols"]
         },
+    }
+
+
+@app.get("/wards/{ward}/risk/history")
+def ward_risk_history(
+    ward: str,
+    days: int = Query(default=7, ge=1, le=90),
+) -> dict:
+    """Synthetic trailing risk history for a ward.
+
+    The model only ever scores one snapshot (historical Feb-Apr 2024
+    CHIRPS rainfall baked into ``_scored_wards``) - there is no time series
+    of past predictions to serve. This endpoint fabricates a plausible
+    trailing trend by deterministically perturbing the current score day by
+    day (seeded from the ward name + date, so repeated calls are stable
+    rather than jumping around on every request). It is NOT measured
+    history and should be labelled as such in the UI.
+    """
+    wards = _scored_wards()
+    match = wards[wards["ward"].str.lower() == ward.lower()]
+    if match.empty:
+        raise HTTPException(status_code=404, detail=f"Unknown ward: {ward}")
+    current = float(match.iloc[0]["flood_prob"])
+    canonical_ward = match.iloc[0]["ward"]
+
+    history = []
+    today = datetime.now(UTC).date()
+    for offset in range(days - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        seed = f"{canonical_ward}|{day.isoformat()}"
+        digest = hashlib.sha256(seed.encode()).hexdigest()
+        # Map the hash to a small deterministic wobble in [-0.12, 0.12],
+        # trending toward the current score as offset -> 0.
+        wobble = ((int(digest[:8], 16) / 0xFFFFFFFF) - 0.5) * 0.24
+        decay = offset / max(days - 1, 1)  # 1.0 far in the past -> 0.0 today
+        score = current + wobble * decay
+        history.append(
+            {
+                "date": day.isoformat(),
+                "risk_score": round(min(max(score, 0.0), 1.0), 4),
+            }
+        )
+    # Force the last point to exactly match the live score.
+    history[-1]["risk_score"] = round(current, 4)
+
+    return {
+        "ward": canonical_ward,
+        "synthetic": True,
+        "note": "Fabricated trailing trend around the current model score; "
+        "not measured history. There is only one real snapshot "
+        "(historical Feb-Apr 2024 rainfall).",
+        "history": history,
+    }
+
+
+@app.get("/wards/geojson")
+def wards_geojson(county: str | None = Query(default=None)) -> dict:
+    """Official ward boundaries as GeoJSON, parsed from Data/floods.gpkg.
+
+    Unlike the other new endpoints this one is real, not mocked: the same
+    source file backs /wards/risk, so geometry and risk scores share ward
+    names and can be joined client-side (see normalizeWardName /
+    findApiWard in the frontend's src/lib/api.ts).
+    """
+    wards = gpd.read_file(FLOODS_GPKG)
+    if county:
+        wards = wards[wards["county"].str.lower() == county.lower()]
+        if wards.empty:
+            raise HTTPException(status_code=404, detail=f"Unknown county: {county}")
+    cols = ["ward", "subcounty", "county", "geometry"]
+    fc = json.loads(wards[cols].to_json())
+    return fc
+
+
+@app.get("/evacuation-centres")
+def evacuation_centres(
+    county: str | None = Query(default=None),
+    ward: str | None = Query(default=None),
+) -> dict:
+    """Evacuation centre locations, capacity and occupancy.
+
+    Mock data (Data/mock/evacuation_centres.json) - there is no public
+    registry of evacuation centres to source this from. Locations are
+    seeded from real Nairobi ward centroids so pins land in sensible
+    places; capacity/occupancy/status are fabricated. Swap this function
+    for a real data source without touching the response shape once one
+    exists.
+    """
+    with open(EVACUATION_CENTRES_PATH, encoding="utf-8") as f:
+        centres = json.load(f)
+    if county:
+        centres = [c for c in centres if c["county"].lower() == county.lower()]
+    if ward:
+        centres = [c for c in centres if c["ward"].lower() == ward.lower()]
+    return {"mock": True, "n": len(centres), "centres": centres}
+
+
+_WEATHER_CONDITIONS = ["Partly Cloudy", "Overcast", "Light Rain", "Clear", "Thunderstorms"]
+
+
+@app.get("/weather")
+def weather(ward: str = Query(min_length=1, max_length=100)) -> dict:
+    """Per-ward weather snapshot.
+
+    Mock data - there is no weather provider wired into this service (see
+    Utils/rainfall_fetcher.py and Utils/kmd_fetcher.py, which are historical
+    CHIRPS rainfall and best-effort KMD advisory scraping respectively, not
+    a live current-conditions API). Values are deterministically generated
+    per ward + hour so they stay stable within an hour instead of jumping on
+    every request, but are not real observations. Swap the body of this
+    function for a real provider without changing the response shape.
+    """
+    hour_bucket = datetime.now(UTC).strftime("%Y-%m-%dT%H")
+    digest = hashlib.sha256(f"{ward.lower()}|{hour_bucket}".encode()).hexdigest()
+    temp_c = 16 + (int(digest[0:4], 16) % 140) / 10.0  # 16.0-30.0
+    humidity_pct = 40 + int(digest[4:6], 16) % 55  # 40-94
+    rainfall_today_mm = round((int(digest[6:8], 16) % 100) * 0.6, 1)  # 0-59.4
+    condition = _WEATHER_CONDITIONS[int(digest[8:10], 16) % len(_WEATHER_CONDITIONS)]
+    return {
+        "mock": True,
+        "ward": ward,
+        "temp_c": round(temp_c, 1),
+        "condition": condition,
+        "humidity_pct": humidity_pct,
+        "rainfall_today_mm": rainfall_today_mm,
+        "generated_at": datetime.now(UTC).isoformat(),
     }
 
 

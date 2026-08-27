@@ -288,3 +288,71 @@ def test_search_no_results(client):
     body = client.get("/search", params={"q": "xyzzy_nonexistent"}).json()
     assert body["total"] == 0
     assert all(len(v) == 0 for v in body["results"].values())
+
+
+def test_ward_risk_history(client):
+    ward = client.get("/wards/risk", params={"county": "Nairobi"}).json()["wards"][0]["ward"]
+    body = client.get(f"/wards/{ward}/risk/history", params={"days": 5}).json()
+    assert body["synthetic"] is True
+    assert len(body["history"]) == 5
+    assert all(0.0 <= h["risk_score"] <= 1.0 for h in body["history"])
+    # last point matches the live score exactly
+    live = client.get(f"/wards/{ward}/risk").json()["flood_prob"]
+    assert body["history"][-1]["risk_score"] == round(live, 4)
+
+
+def test_ward_risk_history_unknown_ward_404(client):
+    assert client.get("/wards/Atlantis Ward/risk/history").status_code == 404
+
+
+def test_ward_risk_history_stable_for_same_day(client):
+    ward = client.get("/wards/risk", params={"county": "Nairobi"}).json()["wards"][0]["ward"]
+    a = client.get(f"/wards/{ward}/risk/history", params={"days": 3}).json()
+    b = client.get(f"/wards/{ward}/risk/history", params={"days": 3}).json()
+    assert a == b
+
+
+def test_wards_geojson(client):
+    body = client.get("/wards/geojson", params={"county": "Nairobi"}).json()
+    assert body["type"] == "FeatureCollection"
+    assert len(body["features"]) > 0
+    props = body["features"][0]["properties"]
+    assert props["county"] == "Nairobi"
+    assert "ward" in props
+    assert body["features"][0]["geometry"]["type"] in ("Polygon", "MultiPolygon")
+
+
+def test_wards_geojson_unknown_county_404(client):
+    assert client.get("/wards/geojson", params={"county": "Atlantis"}).status_code == 404
+
+
+def test_evacuation_centres(client):
+    body = client.get("/evacuation-centres").json()
+    assert body["mock"] is True
+    assert body["n"] > 0
+    centre = body["centres"][0]
+    assert {"id", "name", "ward", "county", "lat", "lng", "capacity", "occupancy", "status"} <= set(centre)
+    assert centre["status"] in ("open", "full")
+
+
+def test_evacuation_centres_county_filter(client):
+    body = client.get("/evacuation-centres", params={"county": "Nairobi"}).json()
+    assert all(c["county"].lower() == "nairobi" for c in body["centres"])
+
+
+def test_weather(client):
+    body = client.get("/weather", params={"ward": "Karen Ward"}).json()
+    assert body["mock"] is True
+    assert 0 <= body["temp_c"] <= 45
+    assert 0 <= body["humidity_pct"] <= 100
+    assert body["rainfall_today_mm"] >= 0
+    assert body["condition"]
+
+
+def test_weather_missing_ward_422(client):
+    assert client.get("/weather").status_code == 422
+
+
+def test_cors_headers_present(client):
+    resp = client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert resp.headers.get("access-control-allow-origin") in ("*", "http://localhost:5173")
