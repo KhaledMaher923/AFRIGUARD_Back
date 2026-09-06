@@ -20,6 +20,6 @@ folium==0.20.0
 plotly==6.9.0
 groq==1.6.0
 africastalking==2.0.3
-fastapi==0.141.1
+fastapi[standard]==0.141.1
 uvicorn==0.52.1
 gtfs-realtime-bindings==2.2.0
